@@ -27,7 +27,7 @@ String sendHumidity(float lastTemp);
 void checkForUpdates();
 
 unsigned long lastUpdateCheck = 0;          // timestamp of last update check
-const unsigned long updateInterval = 60000; // 1 minute in milliseconds
+const unsigned long updateInterval = 10000; // 1 minute in milliseconds
 
 void setup()
 {
@@ -278,7 +278,7 @@ void checkForUpdates()
   WiFiClientSecure client;
   client.setInsecure(); // for now, skip SSL verification
 
-  String url = "https://chewbacca-14.github.io/Sumbre/firmware.bin";
+  String url = "https://github.com/Chewbacca-14/Sumbre/blob/main/firmware.bin";
 
   Serial.println("Checking for updates from: " + url);
 
