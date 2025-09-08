@@ -2,15 +2,39 @@
 #include <ESP8266WebServer.h>
 #include <LittleFS.h>
 #include <ESP8266Ping.h>
+#include "Sensor.h"
+#include <ESP8266HTTPClient.h>
+#include <ESP8266httpUpdate.h>
 
 const char *ssid = "sumbre";
 const char *password = "adaptine";
 
+const char *devDomain = "patrol.adaptine.com"; // replace with your server
+const int httpsPort = 443;
+
+// PatrolControl device token
+const char *bearerToken = "68becdb258b33e320e00cd04|VDgCF3Ni6e1U7qdq624eWK6lty9cvHzPnhHeULXc5d9ac7be";
+
+Sensor sensor;
+
+unsigned long lastRead = 0;
+float lastTemp = 0;
+float lastHum = 0;
+
 ESP8266WebServer server(80);
+
+String sendHumidity(float lastTemp);
+void checkForUpdates();
+
+unsigned long lastUpdateCheck = 0;          // timestamp of last update check
+const unsigned long updateInterval = 60000; // 1 minute in milliseconds
 
 void setup()
 {
   Serial.begin(115200);
+
+  // Initialize sensor
+  sensor.begin();
 
   if (!LittleFS.begin())
   {
@@ -25,6 +49,8 @@ void setup()
   Serial.println();
   Serial.print("Hotspot IP: ");
   Serial.println(WiFi.softAPIP());
+
+  checkForUpdates();
 
   // Serve files
   server.on("/", []()
@@ -89,10 +115,26 @@ void setup()
   // Ping
   server.on("/ping", []()
             {
-    if (Ping.ping("8.8.8.8", 3))
-      server.send(200, "text/plain", "✅ Ping success");
-    else
-      server.send(200, "text/plain", "❌ Ping failed"); });
+    String result = sendHumidity(lastTemp);
+    Serial.println("[Ping] Result: " + result);
+    server.send(200, "text/plain", result); });
+
+  // Sensor data
+  server.on("/sensor", []()
+            {
+    String json = "{";
+    json += "\"temperature\":44,";
+    json += "\"humidity\":44";
+    json += "}";
+    server.send(200, "application/json", json); });
+
+  // server.on("/sensor", []()
+  //         {
+  // String json = "{";
+  // json += "\"temperature\":" + String(lastTemp, 1) + ",";
+  // json += "\"humidity\":" + String(lastHum, 1);
+  // json += "}";
+  // server.send(200, "application/json", json); });
 
   // Status
   server.on("/status", []()
@@ -145,5 +187,113 @@ void setup()
 
 void loop()
 {
+  unsigned long currentMillis = millis();
+
+  // Check for OTA update every 1 minute
+  if (currentMillis - lastUpdateCheck >= updateInterval)
+  {
+    Serial.println("Checking for OTA update...");
+    checkForUpdates();
+    lastUpdateCheck = currentMillis;
+  }
+  // Read DHT11 every 2 seconds
+  if (millis() - lastRead > 2000)
+  {
+    sensor.read(lastTemp, lastHum);
+    lastRead = millis();
+    Serial.printf("Temp: %.1f °C, Hum: %.1f %%\n", lastTemp, lastHum);
+  }
   server.handleClient();
+}
+
+#include <time.h>
+
+String sendHumidity(float humidity)
+{
+  WiFiClientSecure client;
+  client.setInsecure(); // skip certificate verification for testing
+
+  // Get current UTC time as ISO8601
+  time_t now = time(nullptr);
+  struct tm *ptm = gmtime(&now);
+  char isoTime[25];
+  strftime(isoTime, sizeof(isoTime), "%Y-%m-%dT%H:%M:%SZ", ptm);
+
+  if (!client.connect(devDomain, httpsPort))
+  {
+    Serial.println("[Humidity] Connection failed!");
+    return "❌ Connection failed";
+  }
+
+  // GraphQL mutation JSON with actual time and temperature, signalStrength as int
+  int signalStrength = (int)humidity;
+  String json =
+      "{"
+      "\"query\":\"mutation { "
+      "ingestDevState(data: [{"
+      "firedAt: \\\"" +
+      String(isoTime) + "\\\", "
+                        "signalStrength: " +
+      String(signalStrength) +
+      "}]) { success }"
+      "}\""
+      "}";
+
+  // Build HTTP POST request
+  String request = "POST /graphql HTTP/1.1\r\n";
+  request += "Host: " + String(devDomain) + "\r\n";
+  request += "Content-Type: application/json\r\n";
+  request += "Authorization: Bearer " + String(bearerToken) + "\r\n"; // Bearer token
+  request += "Content-Length: " + String(json.length()) + "\r\n";
+  request += "Connection: close\r\n\r\n";
+  request += json;
+
+  client.print(request);
+
+  // Read response headers
+  while (client.connected())
+  {
+    String line = client.readStringUntil('\n');
+    if (line == "\r")
+      break;
+  }
+
+  // Read response body
+  String response = client.readString();
+  Serial.println("[Humidity] Server response: " + response);
+
+  // Basic check if mutation succeeded
+  if (response.indexOf("\"status\"") != -1)
+  {
+    return "✅ Humidity sent successfully";
+  }
+  else
+  {
+    return "❌ Failed to send humidity";
+  }
+}
+
+void checkForUpdates()
+{
+  WiFiClientSecure client;
+  client.setInsecure(); // for now, skip SSL verification
+
+  String url = "https://chewbacca-14.github.io/Sumbre/firmware.bin";
+
+  Serial.println("Checking for updates from: " + url);
+
+  t_httpUpdate_return ret = ESPhttpUpdate.update(client, url);
+
+  switch (ret)
+  {
+  case HTTP_UPDATE_FAILED:
+    Serial.printf("❌ Update failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+    break;
+  case HTTP_UPDATE_NO_UPDATES:
+    Serial.println("ℹ️ No updates available");
+    break;
+  case HTTP_UPDATE_OK:
+    Serial.println("✅ Update successful, rebooting...");
+    break;
+  }
 }
